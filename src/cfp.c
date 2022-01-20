@@ -103,68 +103,17 @@ cfp_read_saved(char * const buf, size_t size, Cfp *cfp, int eol)
 	return readlen;
 }
 
-/* public functions */
-Cfp *
-cfopen(const char *path)
-{
-	Cfp	   *cfp = NULL;
-
-	if (has_suffix(path, ".lz4"))
-	{
-		fprintf(stderr, "invalid input, missing .lz4  suffix %s\n",
-				path);
-		return NULL;
-	}
-
-	cfp = calloc(1, sizeof(*cfp));
-	if (cfp == NULL)
-	{
-		fprintf(stderr, "calloc failed %s", strerror(errno));
-		return NULL;
-	}
-
-	cfp->fp = fopen(path, "rb");
-	if (cfp->fp == NULL)
-	{
-		fprintf(stderr, "failed to open input file %s, %s\n", path, strerror(errno));
-		free(cfp);
-		return NULL;
-	}
-
-	/* Be explicit although calloc has taken care of it */
-	cfp->inited = 0;
-
-	return cfp;
-}
-
-int
-cfclose(Cfp *cfp)
-{
-	if (cfp->fp && fclose(cfp->fp))
-	{
-		fprintf(stderr, "failed to close file %s", strerror(errno));
-		return 1;
-	}
-
-	if (cfp->inited)
-	{
-		LZ4F_freeDecompressionContext(cfp->dtx);
-		free(cfp->outbuf);
-		free(cfp->savedbuf);
-	}
-
-	free(cfp);
-
-	return 0;
-}
 /*
+ * Internal workhorse
  * Populate buf with size, if available, decompressed bytes
  */
-ssize_t
-cfread(char * const buf, size_t size, Cfp *cfp)
+static ssize_t
+cfread_internal(char * const buf, size_t bufsize, Cfp *cfp, int eol)
 {
 	size_t	dsize = 0;
 	size_t	rsize;
+	size_t	size = bufsize;
+	int		eol_found = 0;
 
 	char   *readbuf;
 
@@ -179,9 +128,17 @@ cfread(char * const buf, size_t size, Cfp *cfp)
 		cfp->outbuf = realloc(cfp->outbuf, cfp->allocedlen);
 	}
 
+	/* For eol the string has to be NULL terminated */
+	if (eol == 1)
+	{
+		/* NULL terminate buf */
+		memset(buf, '\0', size);
+		size = bufsize -1;
+	}
+
 	/* use already decompressed content if available */
-	dsize = cfp_read_saved(buf, size, cfp, 0);
-	if (dsize == size)
+	dsize = cfp_read_saved(buf, size, cfp, eol);
+	if (dsize == size || (eol == 1 && (dsize > 0 && *(buf + dsize -1) == EOL)))
 		return dsize;
 
 	readbuf = malloc(size);
@@ -219,11 +176,23 @@ cfread(char * const buf, size_t size, Cfp *cfp)
 
 			rp += read_remain;
 
-			/* fill in what space is available in buf */
-			if (outlen > 0 && dsize < size)
+			/*
+			 * fill in what space is available in buf
+			 * if the eol flag is set, either skip if one already found or fill up to EOL
+			 * if present in the outbuf
+			 */
+			if (outlen > 0 && dsize < size && eol_found == 0)
 			{
-				size_t	lib = size - dsize;
+				char   *p;
+				size_t	lib = (eol == 0) ? size - dsize : size -1 -dsize;
 				size_t	len = outlen < lib ? outlen : lib;
+
+				if (eol == 1 && (p = memchr(cfp->outbuf, EOL, outlen)) &&
+					(size_t)(++p - cfp->outbuf) <= len)
+				{
+					len = p - cfp->outbuf;
+					eol_found = 1;
+				}
 
 				memcpy(buf + dsize, cfp->outbuf, len);
 				dsize += len;
@@ -248,11 +217,72 @@ cfread(char * const buf, size_t size, Cfp *cfp)
 				cfp->savedlen += outlen;
 			}
 		}
-	} while (rsize == size && dsize < size);
+	} while (rsize == size && dsize < size && eol_found == 0);
 
 	free(readbuf);
 
 	return dsize;
+}
+
+/* public functions */
+Cfp *
+cfopen(const char *path)
+{
+	Cfp	   *cfp = NULL;
+
+	if (has_suffix(path, ".lz4"))
+	{
+		fprintf(stderr, "invalid input, missing .lz4  suffix %s\n",
+				path);
+		return NULL;
+	}
+
+	cfp = calloc(1, sizeof(*cfp));
+	if (cfp == NULL)
+	{
+		fprintf(stderr, "calloc failed %s", strerror(errno));
+		return NULL;
+	}
+
+	cfp->fp = fopen(path, "rb");
+	if (cfp->fp == NULL)
+	{
+		fprintf(stderr, "failed to open input file %s, %s\n", path, strerror(errno));
+		free(cfp);
+		return NULL;
+	}
+
+	/* Be explicit although calloc has taken care of it */
+	cfp->inited = 0;
+
+	return cfp;
+}
+
+ssize_t
+cfread(char *buf, size_t size, Cfp *cfp)
+{
+	return cfread_internal(buf, size, cfp, 0);
+}
+
+int
+cfclose(Cfp *cfp)
+{
+	if (cfp->fp && fclose(cfp->fp))
+	{
+		fprintf(stderr, "failed to close file %s", strerror(errno));
+		return 1;
+	}
+
+	if (cfp->inited)
+	{
+		LZ4F_freeDecompressionContext(cfp->dtx);
+		free(cfp->outbuf);
+		free(cfp->savedbuf);
+	}
+
+	free(cfp);
+
+	return 0;
 }
 
 int
@@ -263,7 +293,7 @@ cfgetc(Cfp *cfp)
 	if (!cfp)
 		return -1;
 
-	ret = cfread(&buf, sizeof(buf), cfp);
+	ret = cfread_internal(&buf, sizeof(buf), cfp, 0);
 	if (ret < 0)
 		return -1;
 
@@ -273,108 +303,8 @@ cfgetc(Cfp *cfp)
 char *
 cfgets(char * const buf, size_t size, Cfp *cfp)
 {
-	size_t	dsize = 0;
-	size_t	rsize;
-	int		found = 0;
-
-	char   *readbuf;
-
-	/* Lazy init */
-	if (cfp->inited == 0 && cfp_lazy(cfp, size))
+	if (cfread_internal(buf, size, cfp, 1) <= 0)
 		return NULL;
 
-	/* Verfiy that there is enough space in the outbuf */
-	if (size > cfp->allocedlen)
-	{
-		cfp->allocedlen = size;
-		cfp->outbuf = realloc(cfp->outbuf, cfp->allocedlen);
-	}
-
-	/* NULL terminate buf */
-	memset(buf, '\0', size);
-
-	/* use already decompressed content if available */
-	dsize = cfp_read_saved(buf, size -1, cfp, 1);
-	if (dsize == size -1 || (dsize > 0 && *(buf + dsize -1) == EOL))
-		return buf;
-
-	readbuf = malloc(size);
-
-	do
-	{
-		char   *rp;
-		char   *rend;
-
-		rsize = fread(readbuf, 1, size -1, cfp->fp);
-		if (rsize < size -1 && !feof(cfp->fp))
-		{
-			fprintf(stderr, "failed to read from stream %s", strerror(errno));
-			return NULL;
-		}
-
-		rp = readbuf;
-		rend = readbuf + rsize;
-
-		while (rp < rend)
-		{
-			size_t	status;
-			size_t	outlen = cfp->allocedlen;
-			size_t	read_remain = rend - rp;
-
-			memset(cfp->outbuf, 0, outlen);
-			status = LZ4F_decompress(cfp->dtx, cfp->outbuf, &outlen,
-									 rp, &read_remain, NULL);
-			if (LZ4F_isError(status))
-			{
-				fprintf(stderr, "failed to decompress, %s\n",
-						LZ4F_getErrorName(status));
-				return NULL;
-			}
-
-			rp += read_remain;
-
-			/* fill in what space is available in buf if EOL not already filled*/
-			if (outlen > 0 && dsize < size -1 && found == 0)
-			{
-				char   *p;
-				size_t	lib = size -1 - dsize;
-				size_t	len = outlen < lib ? outlen : lib;
-
-				if ((p = memchr(cfp->outbuf, EOL, outlen)) && (size_t)(++p - cfp->outbuf) <= len)
-				{
-					len = p - cfp->outbuf;
-					found = 1;
-				}
-
-				memcpy(buf + dsize, cfp->outbuf, len);
-				dsize += len;
-
-				/* move what did not fit, if any, at the begining of the buf */
-				if (len < outlen)
-					memmove(cfp->outbuf, cfp->outbuf + len, outlen - len);
-				outlen -= len;
-			}
-
-			/* if there is available output, save it */
-			if (outlen > 0)
-			{
-				while (cfp->savedlen + outlen > cfp->savedallocedlen)
-				{
-					cfp->savedallocedlen *= 2;
-					cfp->outbuf = realloc(cfp->outbuf, cfp->savedallocedlen);
-					cfp->savedbuf = realloc(cfp->savedbuf, cfp->savedallocedlen);
-				}
-
-				memcpy(cfp->savedbuf + cfp->savedlen, cfp->outbuf, outlen);
-				cfp->savedlen += outlen;
-			}
-		}
-	} while (rsize == size -1 && (dsize < size -1 || found == 1));
-
-	free(readbuf);
-
-	if (dsize == 0)
-		return NULL;
-
-	return buf;
+	return (char *)buf;
 }
