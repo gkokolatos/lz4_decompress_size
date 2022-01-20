@@ -1,9 +1,11 @@
 # Source, Executable, Includes, Library Defines
-BDIR   = ./build
-IDIR   = ./include
+TOPDIR = $(shell pwd)
+BDIR   = $(TOPDIR)/build
+OBJDIR = $(BDIR)/obj
+IDIR   = $(TOPDIR)/include
 INCL   = $(IDIR)/cfp.h
 SRC    = ./src/lz4_decompress_size.c ./src/cfp.c
-OBJ    = $(SRC:.c=.o)
+OBJ   = $(SRC:%.c=$(OBJDIR)/%.o)
 LIBS   = -llz4
 EXE    = $(BDIR)/lz4_decompress_size
 
@@ -18,9 +20,11 @@ LDFLAGS = -o $(EXE) $(LIBPATH)
 CFDEBUG = -std=c99 -pedantic -D_FORTIFY_SOURCE=0 -Wall -Wextra -Werror -g -DDEBUG -O0
 RM      = /bin/rm -f
 
+
 # Compiling and assembling object files
-%.o: %.c
-	$(CC) -o $*.o -c $(CFLAGS) -I$(IDIR) $*.c
+$(OBJDIR)/%.o: %.c
+	mkdir -p '$(@D)'
+	$(CC) -o $@ -c $(CFLAGS) -I$(IDIR) $<
 
 # Linking
 $(EXE): $(OBJ)
