@@ -24,6 +24,7 @@ RM      = /bin/rm -f
 
 # Linking
 $(EXE): $(OBJ)
+	@mkdir -p $(BDIR)
 	$(CC) $(LDFLAGS) -I$(IDIR) $(OBJ) $(LIBS)
 
 # Object dependencies
@@ -33,6 +34,7 @@ $(OBJ): $(INCL)
 
 TEST_FLAGS = r c l
 check:
+	@mkdir -p ./output
 	@for flag in $(TEST_FLAGS); do \
 		$(VALGRIND) $(EXE) $$flag ./input/wal.sgml.lz4 > ./output/wal.sgml || exit;	\
 		diff ./output/wal.sgml ./expected/wal.sgml || exit;	\
