@@ -17,7 +17,7 @@ functions are
   to fread()
 * cfgets(), to get a NULL terminated string up to new line or up to size,
   similar to fgets()
-* cfgets(), to get a decompressed byte, similar to fgets()
+* cfgetc(), to get a decompressed byte, similar to fgetc()
 
 ## Getting Started
 
